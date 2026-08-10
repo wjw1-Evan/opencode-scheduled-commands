@@ -1,0 +1,21 @@
+{
+  // scheduled-commands 插件示例配置
+  // 复制本文件为 ../schedules.json 后按需修改（相对于本目录：.opencode/schedules.json）
+  "jobs": [
+    {
+      "name": "定时推送",
+      "command": "push",
+      "arguments": "",
+      "cron": "0 */2 * * *",
+      "enabled": true,
+      "notify": true,
+      "timeoutMs": 600000
+    },
+    {
+      "name": "每日启动",
+      "command": "start",
+      "every": "1d",
+      "enabled": false
+    }
+  ]
+}
