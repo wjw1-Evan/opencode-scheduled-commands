@@ -1,9 +1,30 @@
 {
   "name": "opencode-scheduled-commands",
   "version": "1.0.0",
-  "description": "opencode plugin: run user-defined slash commands on a schedule (cron / interval). Zero-dependency, single-file.",
+  "description": "opencode plugin: run user-defined slash commands on a schedule (cron / interval). Zero-dependency, single-file, hot-reload config.",
   "type": "module",
   "license": "MIT",
+  "main": "scheduled-commands.ts",
+  "exports": {
+    ".": "./scheduled-commands.ts"
+  },
+  "files": [
+    "scheduled-commands.ts",
+    "README.md",
+    "LICENSE",
+    "examples"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wjw1-Evan/opencode-scheduled-commands.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wjw1-Evan/opencode-scheduled-commands/issues"
+  },
+  "homepage": "https://github.com/wjw1-Evan/opencode-scheduled-commands#readme",
   "keywords": [
     "opencode",
     "opencode-plugin",
@@ -11,12 +32,6 @@
     "cron",
     "automation",
     "ai"
-  ],
-  "files": [
-    "scheduled-commands.ts",
-    "README.md",
-    "LICENSE",
-    "examples"
   ],
   "engines": {
     "node": ">=18"

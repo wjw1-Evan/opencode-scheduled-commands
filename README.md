@@ -25,6 +25,15 @@
 
 ## 安装
 
+**方式一：npm 安装（推荐获取新版本）**
+
+```bash
+npm install opencode-scheduled-commands
+cp node_modules/opencode-scheduled-commands/scheduled-commands.ts .opencode/plugins/
+```
+
+**方式二：直接从仓库复制**
+
 无需安装 npm 包。将 `scheduled-commands.ts` 复制到项目的 `.opencode/plugins/` 目录：
 
 ```bash
