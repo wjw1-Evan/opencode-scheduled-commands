@@ -6,6 +6,7 @@
 - 支持 **5 字段 cron 表达式** 与 **固定间隔**（`30s` / `5m` / `2h` / `1d`）
 - 配置 **5 秒内热重载**，改 `schedules.json` 无需重启 opencode
 - 每次执行创建全新 session，防重叠、可超时 abort、错误隔离、结构化日志、TUI 通知
+- 可按任务配置 `allowOverlap: true` 允许重叠运行（上一次未完成也按计划启动新任务）
 
 ## 功能特性
 
@@ -14,7 +15,7 @@
 - 通过 SDK `session.command` 调用用户自定义命令（`.opencode/commands/*.md`），服务端自动展开命令模板与 `$ARGUMENTS`
 - 每次执行都会创建全新的 session（ID 记录到 `.opencode/.scheduled-state.json`），多次执行互不共享对话上下文；会话标题包含本次开始时间
 - 防重叠执行：任务执行中即使到点也跳过本次
-- 可选超时：单次执行超时自动 abort 会话，防止无人值守时卡死
+- 可选超时：单次执行超时自动 abort 会话，防止无人值守时卡死；超时后必须等上一个 session 真正停止，才会执行下一次
 - 错误隔离：单个任务配置错误/命令不存在不影响其他任务
 - 结构化日志：以 `scheduled-commands` 服务输出
 - 可选 TUI toast 通知（Web/headless 环境自动忽略）
@@ -98,6 +99,7 @@ agent: build
 | `enabled` | boolean | `false` 时跳过该任务（默认 true） |
 | `notify` | boolean | 执行完成后尝试发送 TUI toast 通知 |
 | `timeoutMs` | number | 单次执行超时（毫秒），超时后 abort 会话并标记 `timeout`（0 = 不限） |
+| `allowOverlap` | boolean | `true` 时允许与上一次执行重叠：上一次未完成也按计划启动新任务（默认 `false`） |
 
 ### 调度规则
 
@@ -117,7 +119,7 @@ agent: build
 ## 运行机制
 
 - **每次新建 session**：每次执行创建全新 session，标题 `[scheduled] <开始时间> <任务名>`（如 `[scheduled] 2026-08-10 14:30:00 每 30 分钟修 bug #1`），可在 TUI 会话列表查看执行过程；最近 session ID 记录在 `.opencode/.scheduled-state.json`（仅记录，不复用）
-- **防重叠**：任务执行中即使到点也跳过本次；不同任务可并行
+- **防重叠**：任务执行中即使到点也跳过本次；不同任务可并行。超时 abort 后也会等上一个会话完全停止再放行下一次，且同一目录只允许一个调度器实例（避免重复/重叠执行）。若某任务需要并发，可设置 `"allowOverlap": true`——此时不再等待上一次完成，按计划启动新任务（`every` 的间隔从上次**启动**时刻起算，cron 则按墙钟触发，慢任务不会拖住后续触发）
 - **状态文件**：`.opencode/.scheduled-state.json` 记录每个任务的 sessionId、最近运行时间/状态（`ok`/`error`/`timeout`/`aborted`/`skipped`）/次数；删除文件可重置全部任务
 - **热重载**：每 5 秒 tick 重读配置文件，修改 `schedules.json` 最多 5 秒生效
 - **日志**：通过 `client.app.log` 以 `scheduled-commands` 服务输出结构化日志
@@ -148,6 +150,19 @@ agent: build
   ]
 }
 ```
+
+## 测试
+
+使用 Node.js 内置测试运行器（`node:test`，无需安装依赖），直接运行 TypeScript：
+
+```bash
+npm test
+```
+
+覆盖内容：
+
+- **纯函数**：`parseJsonc`（注释/尾逗号/字符串内注释）、`parseCron`（字段/步进/范围/周 0 与 7）、`nextCronTime`（含 vixie 日/周 OR 语义）、`parseInterval`、`nextIntervalTime`、`errorMessage`
+- **调度器**（`createScheduler` + mock SDK client）：`every`/`cron` 触发、热重载、间隔 catch-up、防重叠、`allowOverlap` 并发、超时 abort（含"上一个会话停止前不放行下一次"）、状态文件持久化、配置错误隔离
 
 ## License
 

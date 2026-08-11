@@ -16,6 +16,13 @@
       "command": "start",
       "every": "1d",
       "enabled": false
+    },
+    {
+      "name": "每分钟健康检查（允许重叠）",
+      "command": "check",
+      "cron": "* * * * *",
+      "timeoutMs": 120000,
+      "allowOverlap": true
     }
   ]
 }
