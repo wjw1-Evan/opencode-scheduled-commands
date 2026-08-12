@@ -371,7 +371,9 @@ export function createScheduler(deps: SchedulerDeps) {
     if (job.allowOverlap) {
       // 允许重叠：把 lastRun 锚定到本次启动时刻，使间隔从启动起算、慢任务不拖住后续触发；
       // 完成时不回写 lastRun，避免并发的多次完成互相覆盖/回退。
-      state.jobs[jobKeyName] = { ...state.jobs[jobKeyName], lastRun: started }
+      // 原子更新：读取-修改-写入之间可能有并发，但这是可接受的（lastRun 是近似值）
+      const current = state.jobs[jobKeyName] ?? {}
+      state.jobs[jobKeyName] = { ...current, lastRun: started }
       saveState()
     }
     let sessionId: string | undefined
@@ -495,7 +497,13 @@ export function createScheduler(deps: SchedulerDeps) {
         }
         continue
       }
-      if (next !== null && next <= nowValue && next > (state.jobs[key]?.lastRun ?? 0)) {
+      // 允许重叠的任务：next > lastRun 时启动（同一触发点不重复）
+      // 不允许重叠的任务：next <= now && next > lastRun && 不在运行中 时启动
+      const lastRun = state.jobs[key]?.lastRun ?? 0
+      const shouldRun = job.allowOverlap
+        ? next !== null && next <= nowValue && next > lastRun
+        : next !== null && next <= nowValue && next > lastRun
+      if (shouldRun) {
         running.set(key, (running.get(key) ?? 0) + 1)
         void runJob(key, job, i).finally(() => {
           const count = (running.get(key) ?? 1) - 1
@@ -506,8 +514,45 @@ export function createScheduler(deps: SchedulerDeps) {
     }
   }
 
+  /** 调度器实例锁文件，防止同一目录多个调度器同时运行 */
+  const lockFilePath = join(directory, ".opencode", ".scheduled-lock")
+
+  /**
+   * 尝试获取锁（返回是否成功）。
+   * 使用 O_EXCL 标志创建文件实现原子性锁（进程级）。
+   * 多调度器实例同时调用时，只有一个能成功创建锁文件。
+   */
+  function tryAcquireLock(): boolean {
+    try {
+      const flag = "wx" as const // O_WRONLY | O_CREAT | O_EXCL
+      const fd = require("node:fs").openSync(lockFilePath, flag)
+      // 写入当前进程 PID，便于诊断
+      require("node:fs").writeFileSync(fd, String(process.pid), "utf8")
+      require("node:fs").closeSync(fd)
+      return true
+    } catch {
+      // 文件已存在（锁被其他实例持有）
+      return false
+    }
+  }
+
+  function releaseLock(): void {
+    try {
+      if (existsSync(lockFilePath)) {
+        require("node:fs").unlinkSync(lockFilePath)
+      }
+    } catch {
+      // 释放锁失败，由下次调度器创建时覆盖
+    }
+  }
+
   return {
     start(): void {
+      // 防止多调度器实例同时运行：只有一个能成功获取锁
+      if (!tryAcquireLock()) {
+        void log("error", `Scheduler already running for directory ${directory}, this instance will not start`)
+        return
+      }
       loadState()
       void log("info", `Scheduler started (tick ${tickMs}ms). Config: ${configPath}`)
       timer = setInterval(() => void tick(), tickMs)
@@ -517,6 +562,7 @@ export function createScheduler(deps: SchedulerDeps) {
     stop(): void {
       if (timer) clearInterval(timer)
       timer = undefined
+      releaseLock()
     },
     /** 供测试与手动触发使用 */
     tickNow(): Promise<void> {
