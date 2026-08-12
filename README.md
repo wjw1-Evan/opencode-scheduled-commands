@@ -1,168 +1,170 @@
 # opencode-scheduled-commands
 
-让 [opencode](https://opencode.ai) 像 cron 一样**定时重复执行自定义命令**——每 30 分钟自动修 bug、每天定时推代码、整点跑健康检查，全部无人值守。
+Schedule opencode commands like cron—auto-fix bugs every 30 minutes, push code daily, run health checks on the hour, all unattended.
 
-- 零依赖、单文件（约 550 行 TypeScript），无需 `npm install`
-- 支持 **5 字段 cron 表达式** 与 **固定间隔**（`30s` / `5m` / `2h` / `1d`）
-- 配置 **5 秒内热重载**，改 `schedules.json` 无需重启 opencode
-- 每次执行创建全新 session，防重叠、可超时 abort、错误隔离、结构化日志、TUI 通知
-- 可按任务配置 `allowOverlap: true` 允许重叠运行（上一次未完成也按计划启动新任务）
+- **Zero dependency, single file** (~550 lines TypeScript), no `npm install` needed
+- **Support for 5-field cron expressions** and **fixed intervals** (`30s` / `5m` / `2h` / `1d`)
+- **Hot-reload within 5 seconds**, modify `schedules.json` without restarting opencode
+- Creates a new session for each run, with overlap prevention, timeout abort, error isolation, structured logs, and TUI notifications
+- Configure `allowOverlap: true` to allow concurrent runs (starts new tasks even if previous one is still running)
 
-## 功能特性
+[简体中文版](./README.zh-CN.md)
 
-- 读取 `.opencode/schedules.json`（JSONC 格式，支持注释与尾逗号）中的任务列表
-- 每个任务可配置 5 字段 cron 表达式或固定间隔（`every`），到期自动执行
-- 通过 SDK `session.command` 调用用户自定义命令（`.opencode/commands/*.md`），服务端自动展开命令模板与 `$ARGUMENTS`
-- 每次执行都会创建全新的 session（ID 记录到 `.opencode/.scheduled-state.json`），多次执行互不共享对话上下文；会话标题包含本次开始时间
-- 防重叠执行：任务执行中即使到点也跳过本次
-- 可选超时：单次执行超时自动 abort 会话，防止无人值守时卡死；超时后必须等上一个 session 真正停止，才会执行下一次
-- 错误隔离：单个任务配置错误/命令不存在不影响其他任务
-- 结构化日志：以 `scheduled-commands` 服务输出
-- 可选 TUI toast 通知（Web/headless 环境自动忽略）
+## Features
 
-## 环境要求
+- Reads task list from `.opencode/schedules.json` (JSONC format with comments and trailing commas)
+- Each task can be configured with 5-field cron expression or fixed interval (`every`), executes when due
+- Calls user-defined commands (`.opencode/commands/*.md`) via SDK `session.command`, server automatically expands command templates and `$ARGUMENTS`
+- Each execution creates a new session (ID recorded in `.opencode/.scheduled-state.json`), multiple executions don't share conversation context; session title includes start time
+- **Overlap prevention**: skips execution if task is already running; different tasks can run in parallel
+- **Optional timeout**: automatically aborts session on timeout to prevent hanging during unattended operation; waits for previous session to fully stop before next execution
+- **Error isolation**: individual task config errors/missing commands don't affect other tasks
+- **Structured logging**: outputs as `scheduled-commands` service
+- **Optional TUI toast notifications** (automatically ignored in web/headless environments)
 
-- opencode **v1.18+**（使用 `{ id, server }` server 插件导出格式）
+## Requirements
 
-## 安装
+- opencode **v1.18+** (uses `{ id, server }` server plugin export format)
 
-**方式一：npm 安装（推荐获取新版本）**
+## Installation
+
+**Method 1: npm install (recommended for new versions)**
 
 ```bash
 npm install opencode-scheduled-commands
 cp node_modules/opencode-scheduled-commands/scheduled-commands.ts .opencode/plugins/
 ```
 
-**方式二：直接从仓库复制**
+**Method 2: Copy directly from repository**
 
-无需安装 npm 包。将 `scheduled-commands.ts` 复制到项目的 `.opencode/plugins/` 目录：
+No npm package installation needed. Copy `scheduled-commands.ts` to your project's `.opencode/plugins/` directory:
 
 ```bash
 mkdir -p .opencode/plugins
 cp scheduled-commands.ts .opencode/plugins/
 ```
 
-重启 opencode 生效（之后修改配置无需重启）。插件启动时自动发现并加载。
+Restart opencode to take effect (no restart needed for config changes). The plugin is auto-discovered and loaded on startup.
 
-## 快速开始
+## Quick Start
 
-### 1. 定义命令（你要"定时干什么"）
+### 1. Define commands (what you want to schedule)
 
-在 `.opencode/commands/` 下创建自定义命令，例如 `.opencode/commands/push.md`：
+Create custom commands in `.opencode/commands/`, for example `.opencode/commands/push.md`:
 
 ```markdown
 ---
-description: 推送代码与标签（含安全同步检查）
+description: Push code and tags (with safe sync check)
 agent: build
 ---
 
-1. **检查状态**：`git status -sb` 与 `git ls-remote --tags origin`；本地无领先提交且本地 tag 已全部同步 → 提示"没有可推送的内容"并终止
-2. **同步上游**：`git fetch origin`；若本地落后 → `git pull --rebase`（有改动先 `git stash push -u`，成功后 `git stash pop`）；冲突 → 停止报告
-3. **推送代码**：存在上游 → `git push`；无上游 → `git push -u origin HEAD`
-4. **推送标签**：`git push --tags`
-5. **验证**：`git status -sb` up-to-date；失败 → 报告错误，禁止 `--force`
+1. **Check status**: `git status -sb` and `git ls-remote --tags origin`; if local has no ahead commits and all local tags are synced → prompt "nothing to push" and exit
+2. **Sync upstream**: `git fetch origin`; if local is behind → `git pull --rebase` (run `git stash push -u` first if there are changes, `git stash pop` after success); conflict → stop and report
+3. **Push code**: if upstream exists → `git push`; otherwise → `git push -u origin HEAD`
+4. **Push tags**: `git push --tags`
+5. **Verify**: `git status -sb` shows up-to-date; failure → report error, forbid `--force`
 ```
 
-### 2. 配置调度（.opencode/schedules.json）
+### 2. Configure scheduler (.opencode/schedules.json)
 
 ```jsonc
 {
-  // 任务列表（JSONC，支持注释与尾逗号）
+  // Task list (JSONC, supports comments and trailing commas)
   "jobs": [
     {
-      "name": "每 30 分钟拉取源码并修 bug", // 任务名（唯一标识）
-      "command": "bugfix",                   // 执行 .opencode/commands/bugfix.md
-      "arguments": "",                       // 传给命令的参数（$ARGUMENTS / $1 ...）
-      "cron": "*/30 * * * *",                // 5 字段 cron：分 时 日 月 周
-      // "every": "30m",                     // 或固定间隔："30s"、"5m"、"2h"、"1d"
-      "enabled": true,                       // false 时跳过该任务
-      "notify": true,                        // 完成后发送 TUI toast 通知
-      "timeoutMs": 600000                    // 单次执行超时（毫秒），超时 abort
+      "name": "Fix bugs every 30 minutes", // Task name (unique identifier)
+      "command": "bugfix",                   // Execute .opencode/commands/bugfix.md
+      "arguments": "",                       // Parameters passed to command ($ARGUMENTS / $1 ...)
+      "cron": "*/30 * * * *",                // 5-field cron: min hour day month dow
+      // "every": "30m",                     // Or fixed interval: "30s", "5m", "2h", "1d"
+      "enabled": true,                       // Skip task if false
+      "notify": true,                        // Send TUI toast notification on completion
+      "timeoutMs": 600000                    // Single execution timeout (ms), abort on timeout
     }
   ]
 }
 ```
 
-完整字段说明见 [examples/schedules.example.json](examples/schedules.example.json) 与下方字段表。
+See [examples/schedules.example.json](examples/schedules.example.json) and the field table below for complete field documentation.
 
-## 配置字段
+## Configuration Fields
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `name` | string | 任务名，唯一标识，用于状态记录与日志（不填则用 `命令#序号`） |
-| `command` | string | **必填**。自定义命令名，对应 `.opencode/commands/<command>.md` |
-| `arguments` | string | 传给命令的参数（对应模板中的 `$ARGUMENTS` / `$1` / `$2` ...） |
-| `agent` | string | 覆盖命令 frontmatter 中指定的 agent（不填用命令默认） |
-| `model` | string | 覆盖执行模型（不填用命令/会话默认模型） |
-| `cron` | string | 5 字段 cron：`分 时 日 月 周`（与 `every` 二选一，`cron` 优先） |
-| `every` | string | 固定间隔：`30s`、`5m`、`2h`、`1d`（默认单位秒） |
-| `enabled` | boolean | `false` 时跳过该任务（默认 true） |
-| `notify` | boolean | 执行完成后尝试发送 TUI toast 通知 |
-| `timeoutMs` | number | 单次执行超时（毫秒），超时后 abort 会话并标记 `timeout`（0 = 不限） |
-| `allowOverlap` | boolean | `true` 时允许与上一次执行重叠：上一次未完成也按计划启动新任务（默认 `false`） |
+| Field | Type | Description |
+|------|------|-------------|
+| `name` | string | Task name, unique identifier, used for state recording and logging (defaults to `command#index`) |
+| `command` | string | **Required**. Custom command name, corresponds to `.opencode/commands/<command>.md` |
+| `arguments` | string | Parameters passed to command (corresponds to `$ARGUMENTS` / `$1` / `$2` ... in template) |
+| `agent` | string | Override agent specified in command frontmatter (defaults to command's agent) |
+| `model` | string | Override execution model (defaults to command/session default model) |
+| `cron` | string | 5-field cron: `min hour day month dow` (choose one with `every`, `cron` takes priority) |
+| `every` | string | Fixed interval: `30s`, `5m`, `2h`, `1d` (default unit is seconds) |
+| `enabled` | boolean | Skip task if `false` (default `true`) |
+| `notify` | boolean | Try to send TUI toast notification on completion |
+| `timeoutMs` | number | Single execution timeout (ms), abort session and mark as `timeout` on expiry (0 = no limit) |
+| `allowOverlap` | boolean | `true` allows overlap with previous execution: starts new task on schedule even if previous one is still running (default `false`) |
 
-### 调度规则
+### Scheduling Rules
 
-**cron（5 字段：分 时 日 月 周）**
+**cron (5 fields: min hour day month dow)**
 
-- 支持 `*`、`*/n` 步进、`a-b` 范围、`a,b,c` 列表组合
-- 周字段 `0` 与 `7` 均为周日
-- vixie cron 语义：日与周字段同时受限时取 OR，否则取 AND
-- 示例：`*/30 * * * *` 每 30 分钟；`0 9 * * 1-5` 工作日 9 点；`0 2 * * *` 每天凌晨 2 点
-- ⚠️ `*/30` 写在**分字段**才是"每 30 分钟"；写在时字段（`* */30 * * *`）只在 0 点匹配
+- Supports `*`, `*/n` step, `a-b` range, `a,b,c` list combinations
+- Day of week field `0` and `7` both mean Sunday
+- vixie cron semantics: OR when both day fields are restricted, AND otherwise
+- Examples: `*/30 * * * *` every 30 minutes; `0 9 * * 1-5` weekdays at 9 AM; `0 2 * * *` daily at 2 AM
+- ⚠️ `*/30` in the **minute field** means "every 30 minutes"; in the hour field (`* */30 * * *`) it only matches at 0 o'clock
 
-**every（固定间隔）**
+**every (fixed interval)**
 
-- 单位 `ms` / `s` / `m` / `h` / `d`，默认秒
-- 基于 `lastRun` 推进；opencode 关闭期间错过的触发只补一次（catch-up），不连补
+- Units: `ms` / `s` / `m` / `h` / `d`, default is seconds
+- Based on `lastRun` progression; missed triggers during opencode downtime only catch up once, not continuously
 
-## 运行机制
+## How It Works
 
-- **每次新建 session**：每次执行创建全新 session，标题 `[scheduled] <开始时间> <任务名>`（如 `[scheduled] 2026-08-10 14:30:00 每 30 分钟修 bug #1`），可在 TUI 会话列表查看执行过程；最近 session ID 记录在 `.opencode/.scheduled-state.json`（仅记录，不复用）
-- **防重叠**：任务执行中即使到点也跳过本次；不同任务可并行。超时 abort 后也会等上一个会话完全停止再放行下一次，且同一目录只允许一个调度器实例（避免重复/重叠执行）。若某任务需要并发，可设置 `"allowOverlap": true`——此时不再等待上一次完成，按计划启动新任务（`every` 的间隔从上次**启动**时刻起算，cron 则按墙钟触发，慢任务不会拖住后续触发）
-- **状态文件**：`.opencode/.scheduled-state.json` 记录每个任务的 sessionId、最近运行时间/状态（`ok`/`error`/`timeout`/`aborted`/`skipped`）/次数；删除文件可重置全部任务
-- **热重载**：每 5 秒 tick 重读配置文件，修改 `schedules.json` 最多 5 秒生效
-- **日志**：通过 `client.app.log` 以 `scheduled-commands` 服务输出结构化日志
-- **配置隔离**：单个 Job 字段错误 → 跳过该 Job；整个文件解析失败 → 本次不加载、5 分钟才重复报错；修好自动恢复
+- **New session each run**: Each execution creates a new session with title `[scheduled] <start time> <task name>` (e.g., `[scheduled] 2026-08-10 14:30:00 Fix bugs every 30 mins #1`), viewable in TUI session list; recent session ID is recorded in `.opencode/.scheduled-state.json` (for record only, not reused)
+- **Overlap prevention**: Skips execution if task is already running; different tasks can run in parallel. After timeout abort, also waits for previous session to fully stop before allowing next execution. Only one scheduler instance per directory (to avoid duplicate/overlap execution). For tasks that need concurrency, set `"allowOverlap": true`—no longer waits for previous completion, starts new task on schedule (`every` interval calculated from last **start** time, cron follows wall clock, slow tasks won't delay subsequent triggers)
+- **State file**: `.opencode/.scheduled-state.json` records each task's sessionId, last run time/status (`ok`/`error`/`timeout`/`aborted`/`skipped`)/count; delete file to reset all tasks
+- **Hot reload**: Re-reads config file every 5 seconds tick, modifying `schedules.json` takes effect within 5 seconds
+- **Logging**: Outputs structured logs via `client.app.log` as `scheduled-commands` service
+- **Config isolation**: Single Job field error → skip that Job; entire file parse failure → don't load this time, report error again after 5 minutes; auto-recovers when fixed
 
-## 注意事项
+## Important Notes
 
-1. **权限**：定时任务以 SDK 方式驱动 agent 执行；项目权限为 `ask` 时无人值守可能挂起等待确认，建议给任务涉及的工具配置 `allow`
-2. **模型成本**：定时任务真实消耗模型 token，请合理设置调度频率
-3. **命令不存在**：执行时返回错误并记录到状态文件，不影响其他任务
-4. **插件修改需重启**；配置修改无需重启
+1. **Permissions**: Scheduled tasks drive agent execution via SDK; if project permission is `ask`, unattended operation may hang waiting for confirmation.建议给任务涉及的工具配置 `allow`
+2. **Model costs**: Scheduled tasks consume real model tokens; set frequency reasonably
+3. **Missing commands**: Execution returns error and records to state file, doesn't affect other tasks
+4. **Plugin changes require restart**; config changes don't require restart
 
-## 示例命令
+## Example Commands
 
-仓库自带的实战命令：
+Practical commands included in the repository:
 
-- [examples/commands/push.md](examples/commands/push.md) — 推送代码与标签（含安全同步检查）
-- [examples/commands/bugfix.md](examples/commands/bugfix.md) — 拉取最新源码、随机找 bug、谨慎修复、跑集成测试、提交（每 30 分钟自动修 bug 场景）
+- [examples/commands/push.md](examples/commands/push.md) — Push code and tags (with safe sync check)
+- [examples/commands/bugfix.md](examples/commands/bugfix.md) — Pull latest source, find random bug, fix carefully, run integration tests, commit (for auto-fix bugs every 30 minutes scenario)
 
-## 常见配置示例
+## Common Configuration Examples
 
 ```jsonc
 {
   "jobs": [
-    { "name": "每 30 分钟推送", "command": "push", "every": "30m" },
-    { "name": "工作日 9 点启动", "command": "start", "cron": "0 9 * * 1-5" },
-    { "name": "每分钟健康检查", "command": "check", "cron": "* * * * *", "timeoutMs": 120000 }
+    { "name": "Push every 30 minutes", "command": "push", "every": "30m" },
+    { "name": "Start at 9 AM weekdays", "command": "start", "cron": "0 9 * * 1-5" },
+    { "name": "Health check every minute", "command": "check", "cron": "* * * * *", "timeoutMs": 120000 }
   ]
 }
 ```
 
-## 测试
+## Testing
 
-使用 Node.js 内置测试运行器（`node:test`，无需安装依赖），直接运行 TypeScript：
+Uses Node.js built-in test runner (`node:test`, no dependency installation needed), runs TypeScript directly:
 
 ```bash
 npm test
 ```
 
-覆盖内容：
+Coverage:
 
-- **纯函数**：`parseJsonc`（注释/尾逗号/字符串内注释）、`parseCron`（字段/步进/范围/周 0 与 7）、`nextCronTime`（含 vixie 日/周 OR 语义）、`parseInterval`、`nextIntervalTime`、`errorMessage`
-- **调度器**（`createScheduler` + mock SDK client）：`every`/`cron` 触发、热重载、间隔 catch-up、防重叠、`allowOverlap` 并发、超时 abort（含"上一个会话停止前不放行下一次"）、状态文件持久化、配置错误隔离
+- **Pure functions**: `parseJsonc` (comments/trailing commas/comments-in-strings), `parseCron` (fields/step/range/dow 0 & 7), `nextCronTime` (including vixie day/dow OR semantics), `parseInterval`, `nextIntervalTime`, `errorMessage`
+- **Scheduler** (`createScheduler` + mock SDK client): `every`/`cron` triggering, hot reload, interval catch-up, overlap prevention, `allowOverlap` concurrency, timeout abort (including "don't allow next execution until previous session stops"), state file persistence, config error isolation
 
 ## License
 
