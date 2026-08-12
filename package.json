@@ -1,6 +1,6 @@
 {
   "name": "opencode-scheduled-commands",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "opencode plugin: run user-defined slash commands on a schedule (cron / interval). Zero-dependency, single-file, hot-reload config.",
   "type": "module",
   "license": "MIT",
@@ -14,6 +14,7 @@
   "files": [
     "scheduled-commands.ts",
     "README.md",
+    "README.zh-CN.md",
     "LICENSE",
     "examples"
   ],
