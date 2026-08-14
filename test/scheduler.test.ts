@@ -1,6 +1,7 @@
 import { test, afterEach, describe } from "node:test"
 import assert from "node:assert/strict"
-import { existsSync } from "node:fs"
+import { spawn, spawnSync } from "node:child_process"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createScheduler } from "../scheduled-commands.ts"
 import { cleanupDirs, makeBareDir, makeClient, makeDir, readState, sleep, writeConfig, writeState } from "./helpers.ts"
@@ -415,5 +416,127 @@ describe("createScheduler：状态与错误隔离", () => {
     mock.resolveCommand(mock.commandCalls[0]!.sessionId)
     await sleep(0)
     assert.deepEqual([...sched.runningJobs], ["B"])
+  })
+})
+
+describe("createScheduler：锁与调试输出", () => {
+  test("陈旧锁（持有进程已死）自动恢复，调度器正常启动", async () => {
+    const dir = makeDir()
+    dirs.push(dir)
+    // 制造一个真实存在但已退出的进程 PID
+    const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"])
+    assert.ok(dead.pid, "spawnSync 应返回已退出进程的 PID")
+    writeFileSync(join(dir, ".opencode", ".scheduled-lock"), String(dead.pid))
+    writeConfig(dir, [makeJob({ name: "A", command: "cmd", every: "1m" })])
+    const mock = makeClient()
+    const logs: string[] = []
+    const sched = makeScheduler(dir, mock.client, () => T0, logs)
+
+    try {
+      sched.start()
+      assert.ok(logs.some((m) => m.includes("stale")), `应有陈旧锁恢复日志，实际: ${logs.join("; ")}`)
+      assert.equal(
+        readFileSync(join(dir, ".opencode", ".scheduled-lock"), "utf8").trim(),
+        String(process.pid),
+        "锁文件应被重写为当前 PID",
+      )
+
+      // 调度器已实际工作
+      await sched.tickNow()
+      await sleep(0)
+      assert.equal(mock.commandCalls.length, 1)
+    } finally {
+      sched.stop()
+    }
+  })
+
+  test("锁内容为无效 PID 时视为陈旧并自动恢复", async () => {
+    const dir = makeDir()
+    dirs.push(dir)
+    // 模拟上个实例在写 PID 之前崩溃 → 锁文件为空
+    writeFileSync(join(dir, ".opencode", ".scheduled-lock"), "")
+    const logs: string[] = []
+    const sched = makeScheduler(dir, makeClient().client, () => T0, logs)
+
+    sched.start()
+    assert.ok(logs.some((m) => m.includes("stale")), `应有陈旧锁恢复日志，实际: ${logs.join("; ")}`)
+    assert.equal(readFileSync(join(dir, ".opencode", ".scheduled-lock"), "utf8").trim(), String(process.pid))
+    sched.stop()
+  })
+
+  test("锁被活动进程持有时不启动，并输出持有者 PID", async () => {
+    const dir = makeDir()
+    dirs.push(dir)
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" })
+    let sched: ReturnType<typeof createScheduler> | undefined
+    try {
+      assert.ok(child.pid)
+      writeFileSync(join(dir, ".opencode", ".scheduled-lock"), String(child.pid))
+      writeConfig(dir, [makeJob({ name: "A", command: "cmd", every: "1m" })])
+      const mock = makeClient()
+      const logs: string[] = []
+      sched = makeScheduler(dir, mock.client, () => T0, logs)
+
+      sched.start()
+      await sleep(0)
+      assert.equal(mock.commandCalls.length, 0, "锁被占用时不应执行任务")
+      assert.ok(
+        logs.some((m) => m.includes("already running") && m.includes(String(child.pid))),
+        `应有"已占用"日志且含持有者 PID，实际: ${logs.join("; ")}`,
+      )
+      // 锁未被破坏
+      assert.equal(readFileSync(join(dir, ".opencode", ".scheduled-lock"), "utf8").trim(), String(child.pid))
+    } finally {
+      child.kill()
+      sched?.stop()
+    }
+  })
+
+  test("debug 模式输出每次 tick 的调度决策与跳过原因", async () => {
+    const dir = makeDir()
+    dirs.push(dir)
+    writeConfig(dir, [
+      makeJob({ name: "A", command: "cmd-a", every: "1m" }),
+      makeJob({ name: "B", command: "cmd-b", cron: "0 9 * * *" }), // 当前 12:00 未到期
+    ])
+    const mock = makeClient()
+    const logs: string[] = []
+    const sched = createScheduler({
+      client: mock.client as Parameters<typeof createScheduler>[0]["client"],
+      directory: dir,
+      log: async (_level, message) => {
+        logs.push(message)
+      },
+      now: () => T0,
+      debug: true,
+    })
+
+    await sched.tickNow()
+    await sleep(0)
+    assert.equal(mock.commandCalls.length, 1, "A 应运行")
+    assert.ok(logs.some((m) => m.includes("Tick")), `应有 Tick 调试日志，实际: ${logs.join("; ")}`)
+    assert.ok(logs.some((m) => m.includes("not due")), `应有跳过原因调试日志，实际: ${logs.join("; ")}`)
+    assert.ok(logs.some((m) => m.includes("starting")), `应有启动调试日志，实际: ${logs.join("; ")}`)
+  })
+
+  test("schedules.json 不存在时 debug 输出提示", async () => {
+    const dir = makeBareDir()
+    dirs.push(dir)
+    const logs: string[] = []
+    const sched = createScheduler({
+      client: makeClient().client as Parameters<typeof createScheduler>[0]["client"],
+      directory: dir,
+      log: async (_level, message) => {
+        logs.push(message)
+      },
+      now: () => T0,
+      debug: true,
+    })
+
+    await sched.tickNow()
+    assert.ok(
+      logs.some((m) => m.includes("no schedules.json")),
+      `应有配置文件缺失提示，实际: ${logs.join("; ")}`,
+    )
   })
 })

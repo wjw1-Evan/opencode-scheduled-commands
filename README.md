@@ -134,6 +134,26 @@ See [examples/schedules.example.json](examples/schedules.example.json) and the f
 3. **Missing commands**: Execution returns error and records to state file, doesn't affect other tasks
 4. **Plugin changes require restart**; config changes don't require restart
 
+## Debugging & Troubleshooting
+
+Jobs not running? Enable debug logging to see the scheduler's per-tick decisions:
+
+```bash
+SCHEDULED_COMMANDS_DEBUG=1 opencode
+```
+
+Debug mode (`level: debug`) outputs:
+
+- **Each tick**: number of jobs loaded, currently running jobs, each job's next run time and skip reason (not due / still running / no schedule configured / `enabled: false`)
+- **Lock details**: lock file path, PID that acquired it
+- **Missing config**: explicit hint when `schedules.json` does not exist
+
+Common issues:
+
+- **Stale lock file blocks the scheduler**: a scheduler instance lock lives at `.opencode/.scheduled-lock` (containing the owner PID). If the process crashed or was killed (Docker restart, Desktop relaunch, etc.), the stale lock is **auto-detected by probing the owner PID and recovered** — no manual cleanup needed. If the log says "Scheduler already running ... held by PID x" and that process is genuinely alive, delete the lock file and restart opencode
+- **Read-only directory**: the plugin needs to create the lock and state files under the project directory; read-only directories (sandbox/read-only mounts) fail startup, with a clear "Failed to start scheduler" error including permission hints
+- **Logs not visible**: errors and warnings are mirrored to the console (stderr) as well as the opencode log service, so they are never silently dropped even if the SDK log channel is unavailable
+
 ## Example Commands
 
 Practical commands included in the repository:

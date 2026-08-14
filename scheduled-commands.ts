@@ -70,6 +70,8 @@ interface SchedulerDeps {
   log?: Logger
   /** 时钟注入（测试用），默认 Date.now */
   now?: () => number
+  /** 调试模式：输出每次 tick 的调度决策、锁细节等。默认读取环境变量 SCHEDULED_COMMANDS_DEBUG */
+  debug?: boolean
 }
 
 /* ============================== JSONC 解析 ============================== */
@@ -258,12 +260,21 @@ export function errorMessage(err: unknown): string {
 
 const TICK_MS = 5_000
 const CONFIG_ERROR_REPORT_INTERVAL_MS = 5 * 60_000
+/** 调试模式环境变量开关：SCHEDULED_COMMANDS_DEBUG=1 / true / yes / on */
+const DEBUG_ENV = /^(1|true|yes|on)$/i.test(process.env.SCHEDULED_COMMANDS_DEBUG ?? "")
 
 export function createScheduler(deps: SchedulerDeps) {
   const { client, directory, log = defaultLogger(client), now = Date.now } = deps
+  const debug = deps.debug ?? DEBUG_ENV
   const tickMs = deps.tickMs ?? TICK_MS
   const configPath = join(directory, ".opencode", "schedules.json")
   const statePath = join(directory, ".opencode", ".scheduled-state.json")
+
+  /** 调试信息输出：仅 debug 开启时记录（level=debug），用于排查"任务为什么没跑" */
+  async function debugLog(message: string, extra?: Record<string, unknown>): Promise<void> {
+    if (!debug) return
+    await log("debug", message, extra)
+  }
 
   // 正在执行的任务（key -> 并发数）。allowOverlap 的任务可 >1，其余任务最多 1。
   const running = new Map<string, number>()
@@ -278,7 +289,7 @@ export function createScheduler(deps: SchedulerDeps) {
         state = { jobs: parsed.jobs ?? {} }
       }
     } catch (e) {
-      void log("warn", "Failed to read state file, starting fresh", { error: String(e) })
+      void log("warn", `Failed to read state file ${statePath}, starting fresh`, { error: String(e) })
       state = { jobs: {} }
     }
   }
@@ -355,12 +366,14 @@ export function createScheduler(deps: SchedulerDeps) {
     if (res.error) throw new Error(`Failed to create session: ${errorMessage(res.error)}`)
     state.jobs[jobKeyName] = { ...state.jobs[jobKeyName], sessionId: res.data.id }
     saveState()
+    void debugLog("Session created", { job: jobKeyName, sessionId: res.data.id, title: jobTitle(job, index) })
     return res.data.id
   }
 
   async function abortSession(sessionId: string): Promise<void> {
     try {
       await client.session.abort({ path: { id: sessionId } })
+      void debugLog("Session aborted (timeout)", { sessionId })
     } catch {
       // abort 失败无需上报
     }
@@ -368,6 +381,7 @@ export function createScheduler(deps: SchedulerDeps) {
 
   async function runJob(jobKeyName: string, job: Job, index: number): Promise<void> {
     const started = now()
+    void debugLog("Job run starting", { job: jobKeyName, command: job.command, allowOverlap: job.allowOverlap, timeoutMs: job.timeoutMs ?? 0 })
     if (job.allowOverlap) {
       // 允许重叠：把 lastRun 锚定到本次启动时刻，使间隔从启动起算、慢任务不拖住后续触发；
       // 完成时不回写 lastRun，避免并发的多次完成互相覆盖/回退。
@@ -477,15 +491,46 @@ export function createScheduler(deps: SchedulerDeps) {
     return null // 未配置调度方式
   }
 
+  /**
+   * tick 的安全包装：任何意外异常都记录日志，而不是变成未处理的 rejection
+   * （部分环境/旧 Node 下未处理的 rejection 会导致进程退出，调度器静默停摆）。
+   */
+  async function safeTick(): Promise<void> {
+    try {
+      await tick()
+    } catch (e) {
+      void log("error", `Scheduler tick crashed unexpectedly: ${String(e)} (will retry on next tick)`)
+    }
+  }
+
   async function tick(): Promise<void> {
-    const jobs = loadJobs()
-    if (jobs.length === 0) return
     const nowValue = now()
+    const jobs = loadJobs()
+    if (jobs.length === 0) {
+      if (!existsSync(configPath)) {
+        void debugLog("Tick: no schedules.json found yet — create .opencode/schedules.json to enable jobs", {
+          directory,
+          configPath,
+        })
+      }
+      return
+    }
+    void debugLog("Tick", {
+      at: formatTimestamp(nowValue),
+      jobCount: jobs.length,
+      running: [...running.entries()].map(([k, c]) => `${k}(${c})`),
+    })
     for (let i = 0; i < jobs.length; i++) {
       const job = jobs[i]!
-      if (job.enabled === false) continue
       const key = jobKey(job, i)
-      if (!job.allowOverlap && (running.get(key) ?? 0) > 0) continue // 防重叠（allowOverlap 时允许并发）
+      if (job.enabled === false) {
+        void debugLog(`Job "${key}" skipped: enabled=false`)
+        continue
+      }
+      if (!job.allowOverlap && (running.get(key) ?? 0) > 0) {
+        void debugLog(`Job "${key}" skipped: still running (overlap not allowed)`)
+        continue // 防重叠（allowOverlap 时允许并发）
+      }
       let next: number | null = null
       try {
         next = nextRunFor(job, state.jobs[key], nowValue)
@@ -500,17 +545,27 @@ export function createScheduler(deps: SchedulerDeps) {
       // 允许重叠的任务：next > lastRun 时启动（同一触发点不重复）
       // 不允许重叠的任务：next <= now && next > lastRun && 不在运行中 时启动
       const lastRun = state.jobs[key]?.lastRun ?? 0
-      const shouldRun = job.allowOverlap
-        ? next !== null && next <= nowValue && next > lastRun
-        : next !== null && next <= nowValue && next > lastRun
-      if (shouldRun) {
-        running.set(key, (running.get(key) ?? 0) + 1)
-        void runJob(key, job, i).finally(() => {
+      const shouldRun = next !== null && next <= nowValue && next > lastRun
+      if (!shouldRun) {
+        void debugLog(`Job "${key}" not due`, {
+          nextRun: next === null ? null : formatTimestamp(next),
+          now: formatTimestamp(nowValue),
+          lastRun: lastRun === 0 ? "never" : formatTimestamp(lastRun),
+          reason: next === null ? "no schedule configured" : next > nowValue ? "not due yet" : `already ran at this trigger point (lastRun=${lastRun})`,
+        })
+        continue
+      }
+      void debugLog(`Job "${key}" starting`, { command: job.command, at: formatTimestamp(next ?? nowValue) })
+      running.set(key, (running.get(key) ?? 0) + 1)
+      void runJob(key, job, i)
+        .catch((e) => {
+          void log("error", `Job "${key}" crashed unexpectedly: ${String(e)}`)
+        })
+        .finally(() => {
           const count = (running.get(key) ?? 1) - 1
           if (count > 0) running.set(key, count)
           else running.delete(key)
         })
-      }
     }
   }
 
@@ -518,29 +573,74 @@ export function createScheduler(deps: SchedulerDeps) {
   const lockFilePath = join(directory, ".opencode", ".scheduled-lock")
 
   /**
-   * 尝试获取锁。
-   * 使用 O_EXCL 标志创建文件实现原子性锁（进程级）。
-   * 多调度器实例同时调用时，只有一个能成功创建锁文件。
-   * 返回 "acquired" 表示拿到锁；"held" 表示锁已被其他实例持有；
-   * 其他错误（如目录不可写）会向上抛出，由 start() 记录明确日志。
+   * 检查锁文件是否陈旧（持有者进程已退出）。
+   * 返回陈旧原因；锁有效（持有者仍存活或无法判断时）返回 null。
+   * 锁文件内容是创建时写入的 PID；PID 不可解析说明上个实例在写锁过程中崩溃。
    */
-  function tryAcquireLock(): "acquired" | "held" {
+  function staleLockReason(): string | null {
+    let pidText = ""
     try {
-      // 确保 .opencode 目录存在：全新环境中该目录可能尚未创建，
-      // 否则 openSync 会抛 ENOENT 且被误判为"锁被占用"，调度器静默不启动
-      mkdirSync(join(directory, ".opencode"), { recursive: true })
-      const fd = openSync(lockFilePath, "wx") // O_WRONLY | O_CREAT | O_EXCL
-      // 写入当前进程 PID，便于诊断
-      writeFileSync(fd, String(process.pid), "utf8")
-      closeSync(fd)
-      return "acquired"
+      pidText = readFileSync(lockFilePath, "utf8").trim()
+    } catch {
+      // 读不出（文件被截断/权限异常）→ 视为陈旧，正常流程总是先写 PID 再 close
+      return `could not read PID from lock file (${lockFilePath})`
+    }
+    const pid = Number(pidText)
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return `lock file contains an invalid PID "${pidText || "(empty)"}" (${lockFilePath})`
+    }
+    try {
+      process.kill(pid, 0) // 探活信号，不产生实际作用
+      return null // 进程仍存活 → 锁被真正持有
     } catch (e) {
-      if (e && typeof e === "object" && (e as { code?: string }).code === "EEXIST") {
-        // 文件已存在（锁被其他实例持有）
+      const code = (e as { code?: string }).code
+      // ESRCH = 进程不存在（已崩溃/被杀/容器重建）→ 陈旧；
+      // EPERM/EACCES 等 = 进程存在但无权限探测 → 保守视为有效
+      return code === "ESRCH" ? `lock owner PID ${pid} is no longer alive (crash or killed process)` : null
+    }
+  }
+
+  /**
+   * 获取锁（带陈旧锁自动恢复）：
+   * 1. O_EXCL 原子创建锁文件并写入当前 PID
+   * 2. 锁已存在时读取持有者 PID 并探活：
+   *    - 持有者已死（崩溃/被杀/容器重建，锁残留）→ 删除陈旧锁并重试一次
+   *    - 持有者仍存活 → 返回 "held"，本实例不启动
+   * 3. 其他错误（目录不可写等）向上抛出，由 start() 记录明确日志。
+   * 并发场景下多实例同时抢锁/删锁是安全的：最终只有一个能 O_EXCL 创建成功。
+   */
+  function acquireLock(): "acquired" | "held" {
+    // 确保 .opencode 目录存在：全新环境中该目录可能尚未创建，
+    // 否则 openSync 会抛 ENOENT 且被误判为"锁被占用"，调度器静默不启动
+    mkdirSync(join(directory, ".opencode"), { recursive: true })
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const fd = openSync(lockFilePath, "wx") // O_WRONLY | O_CREAT | O_EXCL
+        // 写入当前进程 PID，便于诊断与陈旧锁判定
+        writeFileSync(fd, String(process.pid), "utf8")
+        closeSync(fd)
+        if (attempt > 0) {
+          void log("warn", `Recovered stale scheduler lock (${lockFilePath}); previous instance died without cleanup`)
+        }
+        void debugLog("Scheduler lock acquired", { lockFilePath, pid: process.pid })
+        return "acquired"
+      } catch (e) {
+        const code = e && typeof e === "object" ? (e as { code?: string }).code : undefined
+        if (code !== "EEXIST") throw e // 目录不可写等：交给 start() 输出诊断
+        const stale = staleLockReason()
+        if (stale) {
+          void log("warn", `Found stale scheduler lock: ${stale}; removing and retrying once`)
+          try {
+            unlinkSync(lockFilePath)
+          } catch {
+            // 竞态：另一个实例可能已删除；重试时自会区分
+          }
+          continue
+        }
         return "held"
       }
-      throw e
     }
+    return "held"
   }
 
   function releaseLock(): void {
@@ -558,20 +658,34 @@ export function createScheduler(deps: SchedulerDeps) {
       // 防止多调度器实例同时运行：只有一个能成功获取锁
       let lock: "acquired" | "held"
       try {
-        lock = tryAcquireLock()
+        lock = acquireLock()
       } catch (e) {
-        void log("error", `Failed to start scheduler for directory ${directory}: ${String(e)}`)
+        // 最常见原因：项目目录只读（沙箱/容器挂载/权限变更），或锁文件路径不可访问
+        void log("error", `Failed to start scheduler for directory ${directory}: ${String(e)} (scheduler needs write access to ${lockFilePath}; check directory permissions)`, {
+          error: String(e),
+          lockFilePath,
+          directory,
+          platform: process.platform,
+          node: process.version,
+        })
         return
       }
       if (lock === "held") {
-        void log("error", `Scheduler already running for directory ${directory}, this instance will not start`)
+        let owner = "unknown"
+        try {
+          owner = readFileSync(lockFilePath, "utf8").trim() || "unknown"
+        } catch {
+          // 保持 unknown
+        }
+        void log("error", `Scheduler already running for directory ${directory}: lock file ${lockFilePath} is held by PID ${owner}. This instance will not start. If that process is no longer alive (crash/restart), the lock will be auto-recovered on the next start; otherwise delete the lock file and restart opencode.`)
         return
       }
       loadState()
+      void debugLog("Scheduler starting", { directory, configPath, statePath, tickMs, debug })
       void log("info", `Scheduler started (tick ${tickMs}ms). Config: ${configPath}`)
-      timer = setInterval(() => void tick(), tickMs)
+      timer = setInterval(() => void safeTick(), tickMs)
       // 启动时立即检查一次，避免等待首个 tick
-      void tick()
+      void safeTick()
     },
     stop(): void {
       if (timer) clearInterval(timer)
@@ -590,10 +704,13 @@ export function createScheduler(deps: SchedulerDeps) {
 
 function defaultLogger(client: PluginInput["client"]): Logger {
   return async (level, message, extra) => {
+    const line = `[scheduled-commands:${level}] ${message}${extra ? ` ${JSON.stringify(extra)}` : ""}`
+    // 错误与警告始终镜像到控制台（stderr），确保在日志通道不可用/被吞掉的环境里也能看到
+    if (level === "error" || level === "warn") console.error(line)
     try {
       await client.app.log({ body: { service: "scheduled-commands", level, message, extra } })
     } catch {
-      // 日志失败不影响调度
+      // SDK 日志通道不可用（部分 web/headless/受限环境）：错误已在控制台输出，不阻断调度
     }
   }
 }
@@ -633,6 +750,8 @@ export const server: Plugin = async (input: PluginInput) => {
         directoryType: typeof directory,
         directory: typeof directory === "string" ? directory : String(directory),
       }
+      // 同步输出到控制台：有些环境日志通道不可用，错误必须可见
+      console.warn(`[scheduled-commands] Plugin skipped: no project directory provided by host (${typeof directory}); scheduled jobs will not run until a directory is bound`)
       try {
         await client?.app?.log?.({
           body: {
@@ -643,7 +762,7 @@ export const server: Plugin = async (input: PluginInput) => {
           },
         })
       } catch {
-        // 客户端不可用时静默
+        // 客户端不可用时忽略（错误已在控制台输出）
       }
       return {}
     }
@@ -658,12 +777,14 @@ export const server: Plugin = async (input: PluginInput) => {
       directory: typeof directory === "string" ? directory : String(directory),
       error: String(e),
     }
+    // 同步输出到控制台：有些环境日志通道不可用，错误必须可见
+    console.error(`[scheduled-commands] Plugin init failed: ${String(e)}`)
     try {
       await client?.app?.log?.({
         body: { service: "scheduled-commands", level: "error", message: `Plugin init failed: ${String(e)}`, extra: summary },
       })
     } catch {
-      // 客户端不可用时静默
+      // 客户端不可用时忽略（错误已在控制台输出）
     }
     throw e
   }
