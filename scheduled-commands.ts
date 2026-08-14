@@ -14,7 +14,7 @@
  * 配置在每次 tick（默认 5s）时热重载，修改 schedules.json 无需重启 opencode。
  */
 import type { Hooks, Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin"
-import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 /* ============================== 类型定义 ============================== */
@@ -518,28 +518,35 @@ export function createScheduler(deps: SchedulerDeps) {
   const lockFilePath = join(directory, ".opencode", ".scheduled-lock")
 
   /**
-   * 尝试获取锁（返回是否成功）。
+   * 尝试获取锁。
    * 使用 O_EXCL 标志创建文件实现原子性锁（进程级）。
    * 多调度器实例同时调用时，只有一个能成功创建锁文件。
+   * 返回 "acquired" 表示拿到锁；"held" 表示锁已被其他实例持有；
+   * 其他错误（如目录不可写）会向上抛出，由 start() 记录明确日志。
    */
-  function tryAcquireLock(): boolean {
+  function tryAcquireLock(): "acquired" | "held" {
     try {
-      const flag = "wx" as const // O_WRONLY | O_CREAT | O_EXCL
-      const fd = require("node:fs").openSync(lockFilePath, flag)
+      // 确保 .opencode 目录存在：全新环境中该目录可能尚未创建，
+      // 否则 openSync 会抛 ENOENT 且被误判为"锁被占用"，调度器静默不启动
+      mkdirSync(join(directory, ".opencode"), { recursive: true })
+      const fd = openSync(lockFilePath, "wx") // O_WRONLY | O_CREAT | O_EXCL
       // 写入当前进程 PID，便于诊断
-      require("node:fs").writeFileSync(fd, String(process.pid), "utf8")
-      require("node:fs").closeSync(fd)
-      return true
-    } catch {
-      // 文件已存在（锁被其他实例持有）
-      return false
+      writeFileSync(fd, String(process.pid), "utf8")
+      closeSync(fd)
+      return "acquired"
+    } catch (e) {
+      if (e && typeof e === "object" && (e as { code?: string }).code === "EEXIST") {
+        // 文件已存在（锁被其他实例持有）
+        return "held"
+      }
+      throw e
     }
   }
 
   function releaseLock(): void {
     try {
       if (existsSync(lockFilePath)) {
-        require("node:fs").unlinkSync(lockFilePath)
+        unlinkSync(lockFilePath)
       }
     } catch {
       // 释放锁失败，由下次调度器创建时覆盖
@@ -549,7 +556,14 @@ export function createScheduler(deps: SchedulerDeps) {
   return {
     start(): void {
       // 防止多调度器实例同时运行：只有一个能成功获取锁
-      if (!tryAcquireLock()) {
+      let lock: "acquired" | "held"
+      try {
+        lock = tryAcquireLock()
+      } catch (e) {
+        void log("error", `Failed to start scheduler for directory ${directory}: ${String(e)}`)
+        return
+      }
+      if (lock === "held") {
         void log("error", `Scheduler already running for directory ${directory}, this instance will not start`)
         return
       }
@@ -610,6 +624,29 @@ export const server: Plugin = async (input: PluginInput) => {
   try {
     const prev = schedulers.get(directory)
     if (prev) prev.stop()
+    // 某些宿主（如 Desktop 应用未绑定项目目录时）可能不传 directory：
+    // 此时 join(directory, ...) 会抛 "path must be of type string"，导致插件初始化失败。
+    // 这里显式跳过并记录明确日志，避免静默失败，也不让空目录错误地启动调度器。
+    if (typeof directory !== "string" || directory === "") {
+      const summary = {
+        hasClient: !!client,
+        directoryType: typeof directory,
+        directory: typeof directory === "string" ? directory : String(directory),
+      }
+      try {
+        await client?.app?.log?.({
+          body: {
+            service: "scheduled-commands",
+            level: "warn",
+            message: `Plugin skipped: no project directory provided by host (${typeof directory}); scheduled jobs will not run until a directory is bound`,
+            extra: summary,
+          },
+        })
+      } catch {
+        // 客户端不可用时静默
+      }
+      return {}
+    }
     scheduler = createScheduler({ client, directory })
     schedulers.set(directory, scheduler)
     scheduler.start()
@@ -622,7 +659,7 @@ export const server: Plugin = async (input: PluginInput) => {
       error: String(e),
     }
     try {
-      await client?.app.log?.({
+      await client?.app?.log?.({
         body: { service: "scheduled-commands", level: "error", message: `Plugin init failed: ${String(e)}`, extra: summary },
       })
     } catch {

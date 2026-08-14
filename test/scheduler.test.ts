@@ -1,7 +1,9 @@
 import { test, afterEach, describe } from "node:test"
 import assert from "node:assert/strict"
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 import { createScheduler } from "../scheduled-commands.ts"
-import { cleanupDirs, makeClient, makeDir, readState, sleep, writeConfig, writeState } from "./helpers.ts"
+import { cleanupDirs, makeBareDir, makeClient, makeDir, readState, sleep, writeConfig, writeState } from "./helpers.ts"
 
 const MIN = 60_000
 const T0 = new Date(2026, 7, 11, 12, 0, 0).getTime() // 2026-08-11 12:00（本地时间）
@@ -104,6 +106,28 @@ describe("createScheduler：调度触发", () => {
     await sched.tickNow()
     await sleep(0)
     assert.equal(mock.commandCalls.length, 1)
+  })
+
+  test("全新环境：.opencode 目录不存在时 start() 仍能启动调度器", async () => {
+    const dir = makeBareDir()
+    dirs.push(dir)
+    const logs: string[] = []
+    const mock = makeClient()
+    let now = T0
+    const sched = makeScheduler(dir, mock.client, () => now, logs)
+
+    sched.start()
+    assert.ok(existsSync(join(dir, ".opencode")), ".opencode 目录应被自动创建")
+    assert.ok(existsSync(join(dir, ".opencode", ".scheduled-lock")), "锁文件应已创建")
+
+    // 启动后写入配置并 tick，任务应能正常运行
+    writeConfig(dir, [makeJob({ name: "A", command: "cmd", every: "1m" })])
+    await sched.tickNow()
+    await sleep(0)
+    assert.equal(mock.commandCalls.length, 1)
+    assert.ok(!logs.some((m) => m.includes("Failed to start")), "不应有启动失败日志")
+
+    sched.stop()
   })
 
   test("配置热重载：修改 schedules.json 后按新配置运行", async () => {

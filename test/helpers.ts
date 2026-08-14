@@ -92,6 +92,11 @@ export function makeDir(): string {
   return dir
 }
 
+/** 创建不含 .opencode 目录的全新项目目录（模拟新环境克隆/首次安装） */
+export function makeBareDir(): string {
+  return mkdtempSync(join(tmpdir(), "scheduled-commands-test-"))
+}
+
 export function writeConfig(dir: string, jobs: unknown[]): void {
   writeFileSync(join(dir, ".opencode", "schedules.json"), JSON.stringify({ jobs }))
 }
