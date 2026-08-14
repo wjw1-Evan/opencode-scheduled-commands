@@ -1,0 +1,43 @@
+name: Auto-tag version
+
+# 在每次 push 到 main 时检查 package.json 的版本号是否已有对应 tag（vX.Y.Z）。
+# 没有则自动创建该 tag——npm-publish 工作流监听 v* tag，会随之自动发布。
+# 推 tag 的事件不会命中本工作流（只监听 main 分支），不会产生循环触发。
+# 也可在 Actions 页面手动运行，为现有提交补打缺失的版本 tag。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  auto-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auto-create missing version tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("node:fs")
+            const { version } = JSON.parse(fs.readFileSync("package.json", "utf8"))
+            const tag = `v${version}`
+            const repo = context.repo
+            try {
+              await github.rest.git.getRef({ ...repo, ref: `tags/${tag}` })
+              console.log(`Tag ${tag} already exists — nothing to do`)
+            } catch (e) {
+              if (e.status !== 404) throw e
+              try {
+                await github.rest.git.createRef({ ...repo, ref: `refs/tags/${tag}`, sha: context.sha })
+                console.log(`Created missing version tag ${tag} — npm publish workflow will run`)
+              } catch (e2) {
+                if (e2.status === 422) console.log(`Tag ${tag} was just created by a concurrent run — nothing to do`)
+                else throw e2
+              }
+            }
