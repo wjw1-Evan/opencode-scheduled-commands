@@ -28,7 +28,16 @@ Schedule opencode commands like cron—auto-fix bugs every 30 minutes, push code
 
 ## Installation
 
-**Method 1: npm install (recommended for new versions)**
+**Method 1: npm install (recommended)**
+
+Since **v1.3.0** the package ships a compiled JS entry (`scheduled-commands.js`), so you can load it
+directly as a remote plugin in `opencode.jsonc`:
+
+```jsonc
+"plugin": ["opencode-scheduled-commands"]
+```
+
+Or, if you prefer to vendor the file into the project:
 
 ```bash
 npm install opencode-scheduled-commands
@@ -45,6 +54,13 @@ cp scheduled-commands.ts .opencode/plugins/
 ```
 
 Restart opencode to take effect (no restart needed for config changes). The plugin is auto-discovered and loaded on startup.
+
+> **Note for v1.2.0 and earlier:** the package entry was a TypeScript source file (`scheduled-commands.ts`).
+> opencode Desktop (Electron/Node) cannot import `.ts` files inside `node_modules`
+> (`Stripping types is currently unsupported for files under node_modules`), so
+> `"plugin": ["opencode-scheduled-commands"]` failed silently on Desktop. If you use an old version,
+> copy the file into `.opencode/plugins/` and let opencode auto-discover it. (opencode CLI, which runs
+> on Bun, could always load the `.ts` entry directly.)
 
 ## Quick Start
 

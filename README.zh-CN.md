@@ -28,7 +28,15 @@
 
 ## 安装
 
-**方式一：npm 安装（推荐获取新版本）**
+**方式一：npm 安装（推荐）**
+
+**v1.3.0 起** npm 包附带编译后的 JS 入口（`scheduled-commands.js`），可直接作为远程插件在 `opencode.jsonc` 中加载：
+
+```jsonc
+"plugin": ["opencode-scheduled-commands"]
+```
+
+或者仍可将文件复制进项目：
 
 ```bash
 npm install opencode-scheduled-commands
@@ -45,6 +53,12 @@ cp scheduled-commands.ts .opencode/plugins/
 ```
 
 重启 opencode 生效（之后修改配置无需重启）。插件启动时自动发现并加载。
+
+> **v1.2.0 及更早版本注意事项：** 旧版包入口是 TypeScript 源文件（`scheduled-commands.ts`）。
+> opencode Desktop（Electron/Node）无法加载 `node_modules` 下的 `.ts` 文件（`Stripping types is
+> currently unsupported for files under node_modules`），因此旧版 `"plugin": ["opencode-scheduled-commands"]`
+> 在 Desktop 上会静默加载失败。使用旧版时请将文件复制到 `.opencode/plugins/` 由 opencode 自动发现。
+> （opencode CLI 基于 Bun 运行，一直可以直接加载 `.ts` 入口。）
 
 ## 快速开始
 
