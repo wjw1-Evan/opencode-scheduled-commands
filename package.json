@@ -10,7 +10,6 @@
   },
   "scripts": {
     "build": "esbuild scheduled-commands.ts --bundle --format=esm --platform=node --outfile=scheduled-commands.js",
-    "prepublishOnly": "npm run build",
     "test": "node --test test/**/*.test.ts"
   },
   "devDependencies": {
